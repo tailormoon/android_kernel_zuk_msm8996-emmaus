@@ -665,6 +665,22 @@ static int get_hfi_extradata_index(enum hal_extradata_id index)
 	case HAL_EXTRADATA_ROI_QP:
 		ret = HFI_PROPERTY_PARAM_VENC_ROI_QP_EXTRADATA;
 		break;
+	case HAL_EXTRADATA_MASTERING_DISPLAY_COLOUR_SEI:
+		ret =
+		HFI_PROPERTY_PARAM_VDEC_MASTERING_DISPLAY_COLOUR_SEI_EXTRADATA;
+		break;
+	case HAL_EXTRADATA_CONTENT_LIGHT_LEVEL_SEI:
+		ret = HFI_PROPERTY_PARAM_VDEC_CONTENT_LIGHT_LEVEL_SEI_EXTRADATA;
+		break;
+	case HAL_EXTRADATA_VUI_DISPLAY_INFO:
+		ret = HFI_PROPERTY_PARAM_VUI_DISPLAY_INFO_EXTRADATA;
+		break;
+	case HAL_EXTRADATA_VPX_COLORSPACE:
+		ret = HFI_PROPERTY_PARAM_VDEC_VPX_COLORSPACE_EXTRADATA;
+		break;
+	case HAL_EXTRADATA_PQ_INFO:
+		ret = HFI_PROPERTY_PARAM_VENC_OVERRIDE_QP_EXTRADATA;
+		break;
 	default:
 		dprintk(VIDC_WARN, "Extradata index not found: %d\n", index);
 		break;
@@ -1441,6 +1457,12 @@ int create_pkt_cmd_session_set_property(
 		case HAL_RATE_CONTROL_VBR_VFR:
 			pkt->rg_property_data[1] = HFI_RATE_CONTROL_VBR_VFR;
 			break;
+		case HAL_RATE_CONTROL_MBR_CFR:
+			pkt->rg_property_data[1] = HFI_RATE_CONTROL_MBR_CFR;
+			break;
+		case HAL_RATE_CONTROL_MBR_VFR:
+			pkt->rg_property_data[1] = HFI_RATE_CONTROL_MBR_VFR;
+			break;
 		default:
 			dprintk(VIDC_ERR,
 					"Invalid Rate control setting: %p\n",
@@ -1546,6 +1568,25 @@ int create_pkt_cmd_session_set_property(
 		 * pp = qp range for P-frames, etc. */
 		hfi->min_qp = min_qp | min_qp << 8 | min_qp << 16;
 		hfi->max_qp = max_qp | max_qp << 8 | max_qp << 16;
+		hfi->layer_id = hal_range->layer_id;
+
+		pkt->size += sizeof(u32) +
+			sizeof(struct hfi_quantization_range);
+		break;
+	}
+	case HAL_PARAM_VENC_SESSION_QP_RANGE_PACKED:
+	{
+		struct hfi_quantization_range *hfi;
+		struct hfi_quantization_range *hal_range =
+			(struct hfi_quantization_range *) pdata;
+
+		pkt->rg_property_data[0] =
+			HFI_PROPERTY_PARAM_VENC_SESSION_QP_RANGE;
+		hfi = (struct hfi_quantization_range *)
+				&pkt->rg_property_data[1];
+
+		hfi->min_qp = hal_range->min_qp;
+		hfi->max_qp = hal_range->max_qp;
 		hfi->layer_id = hal_range->layer_id;
 
 		pkt->size += sizeof(u32) +
@@ -2076,6 +2117,42 @@ int create_pkt_cmd_session_set_property(
 		pkt->size += sizeof(u32) + sizeof(struct hfi_enable);
 		break;
 	}
+	case HAL_PARAM_VENC_CONSTRAINED_INTRA_PRED:
+	{
+		create_pkt_enable(pkt->rg_property_data,
+			HFI_PROPERTY_PARAM_VENC_CONSTRAINED_INTRA_PRED,
+			((struct hal_enable *)pdata)->enable);
+		pkt->size += sizeof(u32) + sizeof(struct hfi_enable);
+		break;
+	}
+	case HAL_PARAM_VENC_VIDEO_SIGNAL_INFO:
+	{
+		struct hal_video_signal_info *hal = pdata;
+		struct hfi_video_signal_metadata *signal_info =
+			(struct hfi_video_signal_metadata *)
+			&pkt->rg_property_data[1];
+
+		signal_info->enable = true;
+		signal_info->video_format = MSM_VIDC_NTSC;
+		signal_info->video_full_range = hal->full_range;
+		signal_info->color_description = MSM_VIDC_COLOR_DESC_PRESENT;
+		signal_info->color_primaries = hal->color_space;
+		signal_info->transfer_characteristics = hal->transfer_chars;
+		signal_info->matrix_coeffs = hal->matrix_coeffs;
+
+		pkt->rg_property_data[0] =
+			HFI_PROPERTY_PARAM_VENC_VIDEO_SIGNAL_INFO;
+		pkt->size += sizeof(u32) + sizeof(*signal_info);
+		break;
+	}
+	case HAL_PARAM_VENC_H264_TRANSFORM_8x8:
+	{
+		create_pkt_enable(pkt->rg_property_data,
+			HFI_PROPERTY_PARAM_VENC_H264_8X8_TRANSFORM,
+			((struct hal_enable *)pdata)->enable);
+		pkt->size += sizeof(u32) + sizeof(struct hfi_enable);
+		break;
+	}
 	/* FOLLOWING PROPERTIES ARE NOT IMPLEMENTED IN CORE YET */
 	case HAL_CONFIG_BUFFER_REQUIREMENTS:
 	case HAL_CONFIG_PRIORITY:
@@ -2283,6 +2360,37 @@ static int create_3x_pkt_cmd_session_set_property(
 			HFI_PROPERTY_PARAM_VENC_H264_PICORDER_CNT_TYPE;
 		pkt->rg_property_data[1] = *(u32 *)pdata;
 		pkt->size += sizeof(u32) * 2;
+		break;
+	}
+	case HAL_PARAM_VENC_LOW_LATENCY:
+	{
+		struct hfi_enable *hfi;
+
+		pkt->rg_property_data[0] =
+			HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE;
+		hfi = (struct hfi_enable *) &pkt->rg_property_data[1];
+		hfi->enable = ((struct hal_enable *) pdata)->enable;
+		pkt->size += sizeof(u32) * 2;
+		break;
+	}
+	case HAL_CONFIG_VENC_BLUR_RESOLUTION:
+	{
+		struct hfi_frame_size *hfi;
+		struct hal_frame_size *prop = (struct hal_frame_size *) pdata;
+		u32 buffer_type;
+
+		pkt->rg_property_data[0] =
+			HFI_PROPERTY_CONFIG_VENC_BLUR_FRAME_SIZE;
+		hfi = (struct hfi_frame_size *) &pkt->rg_property_data[1];
+		buffer_type = get_hfi_buffer(prop->buffer_type);
+		if (buffer_type)
+			hfi->buffer_type = buffer_type;
+		else
+			return -EINVAL;
+
+		hfi->height = prop->height;
+		hfi->width = prop->width;
+		pkt->size += sizeof(u32) + sizeof(struct hfi_frame_size);
 		break;
 	}
 	default:

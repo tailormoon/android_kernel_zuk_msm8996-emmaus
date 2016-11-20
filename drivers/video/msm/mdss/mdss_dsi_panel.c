@@ -39,7 +39,6 @@
 #include "mdss_ams520.h"
 #include "mdss_otm1901a.h"
 #include "mdss_ft8716.h"
-#include "mdss_livedisplay.h"
 
 struct panel_effect_data lcd_data;
 
@@ -207,7 +206,7 @@ int mdss_dsi_panel_cmd_read(struct mdss_dsi_ctrl_pdata *ctrl, char cmd0,
 	return mdss_dsi_cmdlist_put(ctrl, &cmdreq);
 }
 
-void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
+static void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
 			struct dsi_panel_cmds *pcmds, u32 flags)
 {
 	struct dcs_cmd_req cmdreq;
@@ -952,11 +951,6 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 
 	if (ctrl->ds_registered && pinfo->is_pluggable)
 		mdss_dba_utils_video_on(pinfo->dba_data, pinfo);
-
-	if (pdata->event_handler)
-		pdata->event_handler(pdata, MDSS_EVENT_UPDATE_LIVEDISPLAY,
-				(void *)(unsigned long) MODE_UPDATE_ALL);
-
 end:
 	pr_debug("%s:-\n", __func__);
 	return ret;
@@ -1079,7 +1073,7 @@ static void mdss_dsi_parse_trigger(struct device_node *np, char *trigger,
 }
 
 
-int mdss_dsi_parse_dcs_cmds(struct device_node *np,
+static int mdss_dsi_parse_dcs_cmds(struct device_node *np,
 		struct dsi_panel_cmds *pcmds, char *cmd_key, char *link_key)
 {
 	const char *data;
@@ -1315,7 +1309,7 @@ void mdss_dsi_panel_dsc_pps_send(struct mdss_dsi_ctrl_pdata *ctrl,
 	memset(&cmd, 0, sizeof(cmd));
 
 	cmd.dchdr.dlen = mdss_panel_dsc_prepare_pps_buf(&pinfo->dsc,
-				ctrl->pps_buf, 0 , 1, 0);
+		ctrl->pps_buf, 0);
 	cmd.dchdr.dtype = DTYPE_PPS;
 	cmd.dchdr.last = 1;
 	cmd.dchdr.wait = 10;
@@ -1328,6 +1322,47 @@ void mdss_dsi_panel_dsc_pps_send(struct mdss_dsi_ctrl_pdata *ctrl,
 	pcmds.link_state = DSI_LP_MODE;
 
 	mdss_dsi_panel_cmds_send(ctrl, &pcmds, CMD_REQ_COMMIT);
+}
+
+static int mdss_dsi_parse_dsc_version(struct device_node *np,
+		struct mdss_panel_timing *timing)
+{
+	u32 data;
+	int rc = 0;
+	struct dsc_desc *dsc = &timing->dsc;
+
+	rc = of_property_read_u32(np, "qcom,mdss-dsc-version", &data);
+	if (rc) {
+		dsc->version = 0x11;
+		rc = 0;
+	} else {
+		dsc->version = data & 0xff;
+		/* only support DSC 1.1 rev */
+		if (dsc->version != 0x11) {
+			pr_err("%s: DSC version:%d not supported\n", __func__,
+				dsc->version);
+			rc = -EINVAL;
+			goto end;
+		}
+	}
+
+	rc = of_property_read_u32(np, "qcom,mdss-dsc-scr-version", &data);
+	if (rc) {
+		dsc->scr_rev = 0x0;
+		rc = 0;
+	} else {
+		dsc->scr_rev = data & 0xff;
+		/* only one scr rev supported */
+		if (dsc->scr_rev > 0x1) {
+			pr_err("%s: DSC scr version:%d not supported\n",
+				__func__, dsc->scr_rev);
+			rc = -EINVAL;
+			goto end;
+		}
+	}
+
+end:
+	return rc;
 }
 
 static int mdss_dsi_parse_dsc_params(struct device_node *np,
@@ -1503,11 +1538,16 @@ static int mdss_dsi_parse_topology_config(struct device_node *np,
 
 	data = of_get_property(np, "qcom,compression-mode", NULL);
 	if (data) {
-		if (cfg_np && !strcmp(data, "dsc"))
+		if (cfg_np && !strcmp(data, "dsc")) {
+			rc = mdss_dsi_parse_dsc_version(np, &pt->timing);
+			if (rc)
+				goto end;
+
 			rc = mdss_dsi_parse_dsc_params(cfg_np, &pt->timing,
 					is_split_display);
-		else if (!strcmp(data, "fbc"))
+		} else if (!strcmp(data, "fbc")) {
 			rc = mdss_dsi_parse_fbc_params(np, &pt->timing);
+		}
 	}
 
 end:
@@ -1549,6 +1589,7 @@ static void mdss_panel_parse_te_params(struct device_node *np,
 	rc = of_property_read_u32
 		(np, "qcom,mdss-tear-check-rd-ptr-trigger-intr", &tmp);
 	te->rd_ptr_irq = (!rc ? tmp : timing->yres + 1);
+	te->wr_ptr_irq = 0;
 }
 
 
@@ -1848,6 +1889,9 @@ static int mdss_dsi_parse_panel_features(struct device_node *np,
 	pinfo->panel_ack_disabled = pinfo->sim_panel_mode ?
 		1 : of_property_read_bool(np, "qcom,panel-ack-disabled");
 
+	pinfo->allow_phy_power_off = of_property_read_bool(np,
+		"qcom,panel-allow-phy-poweroff");
+
 	mdss_dsi_parse_esd_params(np, ctrl);
 
 	if (pinfo->panel_ack_disabled && pinfo->esd_check_enabled) {
@@ -1906,6 +1950,13 @@ static void mdss_dsi_parse_panel_horizintal_line_idle(struct device_node *np,
 		kp++;
 		ctrl->horizontal_idle_cnt++;
 	}
+
+	/*
+	 * idle is enabled for this controller, this will be used to
+	 * enable/disable burst mode since both features are mutually
+	 * exclusive.
+	 */
+	ctrl->idle_enabled = true;
 
 	pr_debug("%s: horizontal_idle_cnt=%d\n", __func__,
 				ctrl->horizontal_idle_cnt);
@@ -2557,8 +2608,6 @@ static int mdss_panel_parse_dt(struct device_node *np,
 
 	pinfo->is_dba_panel = of_property_read_bool(np,
 			"qcom,dba-panel");
-
-	mdss_livedisplay_parse_dt(np, pinfo);
 
 	return 0;
 

@@ -165,6 +165,9 @@ enum mdss_hw_capabilities {
 	MDSS_CAPS_YUV_CONFIG,
 	MDSS_CAPS_SCM_RESTORE_NOT_REQUIRED,
 	MDSS_CAPS_3D_MUX_UNDERRUN_RECOVERY_SUPPORTED,
+	MDSS_CAPS_MIXER_1_FOR_WB,
+	MDSS_CAPS_QSEED3,
+	MDSS_CAPS_DEST_SCALER,
 	MDSS_CAPS_MAX,
 };
 
@@ -193,6 +196,25 @@ struct mdss_smmu_client {
 	struct reg_bus_client *reg_bus_clt;
 	bool domain_attached;
 	bool handoff_pending;
+	char __iomem *mmu_base;
+};
+
+struct mdss_mdp_qseed3_lut_tbl {
+	bool valid;
+	u32 *dir_lut;
+	u32 *cir_lut;
+	u32 *sep_lut;
+};
+
+struct mdss_scaler_block {
+	u32 vig_scaler_off;
+	u32 vig_scaler_lut_off;
+	u32 has_dest_scaler;
+	char __iomem *dest_base;
+	u32 ndest_scalers;
+	u32 *dest_scaler_off;
+	u32 *dest_scaler_lut_off;
+	struct mdss_mdp_qseed3_lut_tbl lut_tbl;
 };
 
 struct mdss_data_type;
@@ -293,6 +315,7 @@ struct mdss_data_type {
 
 	u32 mdp_irq_mask;
 	u32 mdp_hist_irq_mask;
+	u32 mdp_intf_irq_mask;
 
 	int suspend_fs_ena;
 	u8 clk_ena;
@@ -453,13 +476,17 @@ struct mdss_data_type {
 	u32 bcolor0;
 	u32 bcolor1;
 	u32 bcolor2;
+	struct mdss_scaler_block *scaler_off;
 };
+
 extern struct mdss_data_type *mdss_res;
 
 struct irq_info {
 	u32 irq;
 	u32 irq_mask;
+	u32 irq_wake_mask;
 	u32 irq_ena;
+	u32 irq_wake_ena;
 	u32 irq_buzy;
 };
 
@@ -483,6 +510,8 @@ struct mdss_util_intf {
 	int (*register_irq)(struct mdss_hw *hw);
 	void (*enable_irq)(struct mdss_hw *hw);
 	void (*disable_irq)(struct mdss_hw *hw);
+	void (*enable_wake_irq)(struct mdss_hw *hw);
+	void (*disable_wake_irq)(struct mdss_hw *hw);
 	void (*disable_irq_nosync)(struct mdss_hw *hw);
 	int (*irq_dispatch)(u32 hw_ndx, int irq, void *ptr);
 	int (*get_iommu_domain)(u32 type);

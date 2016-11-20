@@ -88,6 +88,11 @@ static void ipa3_wq_write_done_common(struct ipa3_sys_context *sys,
 	struct ipa3_tx_pkt_wrapper *next_pkt;
 	int i, cnt;
 
+	if (unlikely(tx_pkt == NULL)) {
+		IPAERR("tx_pkt is NULL\n");
+		return;
+	}
+
 	cnt = tx_pkt->cnt;
 	IPADBG("cnt: %d\n", cnt);
 	for (i = 0; i < cnt; i++) {
@@ -634,7 +639,7 @@ failure:
 		kmem_cache_free(ipa3_ctx->tx_pkt_wrapper_cache, tx_pkt);
 		tx_pkt = next_pkt;
 	}
-	if (i < num_desc)
+	if (j < num_desc)
 		/* last desc failed */
 		if (fail_dma_wrap)
 			kmem_cache_free(ipa3_ctx->tx_pkt_wrapper_cache, tx_pkt);
@@ -2807,6 +2812,7 @@ static int ipa3_assign_policy(struct ipa_sys_connect_params *in,
 			if (sys->rx_pool_sz > IPA_WLAN_RX_POOL_SZ)
 				sys->rx_pool_sz = IPA_WLAN_RX_POOL_SZ;
 			sys->pyld_hdlr = NULL;
+			sys->repl_hdlr = ipa3_replenish_wlan_rx_cache;
 			sys->get_skb = ipa3_get_skb_ipa_rx;
 			sys->free_skb = ipa3_free_skb_rx;
 			in->ipa_ep_cfg.aggr.aggr_en = IPA_BYPASS_AGGR;

@@ -675,6 +675,11 @@ static void swrm_cleanup_disabled_data_ports(struct swr_master *master,
 	int port_disable_cnt = 0;
 	struct swr_mstr_ctrl *swrm = swr_get_ctrl_data(master);
 
+	if (!swrm) {
+		pr_err("%s: swrm is null\n", __func__);
+		return;
+	}
+
 	dev_dbg(swrm->dev, "%s: master num_port: %d\n", __func__,
 		master->num_port);
 
@@ -739,6 +744,11 @@ static void swrm_slvdev_datapath_control(struct swr_master *master,
 		    SWRM_MCP_FRAME_CTRL_BANK_COL_CTRL_BMSK |
 		    SWRM_MCP_FRAME_CTRL_BANK_SSP_PERIOD_BMSK);
 	u8 inactive_bank;
+
+	if (!swrm) {
+		pr_err("%s: swrm is null\n", __func__);
+		return;
+	}
 
 	bank = get_inactive_bank_num(swrm);
 
@@ -828,6 +838,11 @@ static void swrm_copy_data_port_config(struct swr_master *master, u8 bank)
 	u32 val[SWRM_MAX_PORT_REG];
 	int len = 0;
 	struct swr_mstr_ctrl *swrm = swr_get_ctrl_data(master);
+
+	if (!swrm) {
+		pr_err("%s: swrm is null\n", __func__);
+		return;
+	}
 
 	dev_dbg(swrm->dev, "%s: master num_port: %d\n", __func__,
 		master->num_port);
@@ -975,13 +990,12 @@ port_fail:
 mem_fail:
 	list_for_each_safe(ptr, next, &swrm->mport_list) {
 		mport = list_entry(ptr, struct swrm_mports, list);
-		if (!mport)
-			continue;
 		for (i = 0; i < portinfo->num_port; i++) {
 			if (portinfo->port_id[i] == mstr_ports[mport->id]) {
 				port = swrm_get_port(master,
 						portinfo->port_id[i]);
-				port->ch_en = false;
+				if (port)
+					port->ch_en = false;
 				list_del(&mport->list);
 				kfree(mport);
 				break;
@@ -1466,6 +1480,7 @@ static int swrm_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(&pdev->dev);
 	swr_unregister_master(&swrm->master);
 	mutex_destroy(&swrm->mlock);
+	mutex_destroy(&swrm->reslock);
 	kfree(swrm);
 	return 0;
 }
@@ -1636,12 +1651,16 @@ int swrm_wcd_notify(struct platform_device *pdev, u32 id, void *data)
 	case SWR_DEVICE_UP:
 		dev_dbg(swrm->dev, "%s: swr master up called\n", __func__);
 		mutex_lock(&swrm->mlock);
+		mutex_lock(&swrm->reslock);
 		if ((swrm->state == SWR_MSTR_RESUME) ||
 		    (swrm->state == SWR_MSTR_UP)) {
 			dev_dbg(swrm->dev, "%s: SWR master is already UP: %d\n",
 				__func__, swrm->state);
 		} else {
+			pm_runtime_mark_last_busy(&pdev->dev);
+			mutex_unlock(&swrm->reslock);
 			pm_runtime_get_sync(&pdev->dev);
+			mutex_lock(&swrm->reslock);
 			list_for_each_entry(swr_dev, &mstr->devices, dev_list) {
 				ret = swr_reset_device(swr_dev);
 				if (ret) {
@@ -1654,6 +1673,7 @@ int swrm_wcd_notify(struct platform_device *pdev, u32 id, void *data)
 			pm_runtime_mark_last_busy(&pdev->dev);
 			pm_runtime_put_autosuspend(&pdev->dev);
 		}
+		mutex_unlock(&swrm->reslock);
 		mutex_unlock(&swrm->mlock);
 		break;
 	case SWR_SET_NUM_RX_CH:

@@ -574,7 +574,7 @@ failure:
 	for (j = 0; j < i; j++) {
 		next_pkt = list_next_entry(tx_pkt, link);
 		list_del(&tx_pkt->link);
-		if (desc[i].type != IPA_DATA_DESC_SKB_PAGED) {
+		if (desc[j].type != IPA_DATA_DESC_SKB_PAGED) {
 			dma_unmap_single(ipa_ctx->pdev, tx_pkt->mem.phys_base,
 				tx_pkt->mem.size,
 				DMA_TO_DEVICE);
@@ -586,7 +586,7 @@ failure:
 		kmem_cache_free(ipa_ctx->tx_pkt_wrapper_cache, tx_pkt);
 		tx_pkt = next_pkt;
 	}
-	if (i < num_desc)
+	if (j < num_desc)
 		/* last desc failed */
 		if (fail_dma_wrap)
 			kmem_cache_free(ipa_ctx->tx_pkt_wrapper_cache, tx_pkt);
@@ -3005,6 +3005,7 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 				if (sys->rx_pool_sz > IPA_WLAN_RX_POOL_SZ)
 					sys->rx_pool_sz = IPA_WLAN_RX_POOL_SZ;
 				sys->pyld_hdlr = NULL;
+				sys->repl_hdlr = ipa_replenish_wlan_rx_cache;
 				sys->get_skb = ipa_get_skb_ipa_rx;
 				sys->free_skb = ipa_free_skb_rx;
 				in->ipa_ep_cfg.aggr.aggr_en = IPA_BYPASS_AGGR;

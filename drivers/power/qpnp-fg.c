@@ -43,10 +43,15 @@
 #define SUPPORT_CALL_POWER_OP
 #define SUPPORT_SOC_SHOW_OPTIMIZATION
 #define SUPPORT_CPU_TEMP_MONITOR
+#ifdef CONFIG_PRODUCT_Z2_PLUS
+#define SUPPORT_LENUK_BATTERY_ID_ALGO
+#endif
+//#define SUPPORT_QPNP_NOISE_LOG
 
 #ifdef SUPPORT_CPU_TEMP_MONITOR
 #include <linux/msm_tsens.h>
 #endif
+#define LENUK_FIX_WARM_CAP_LEARNING_PROCESS
 
 #ifdef SUPPORT_BATT_TEMP_FLOAT_ALGO
 #ifdef CONFIG_PRODUCT_Z2_ROW
@@ -335,7 +340,7 @@ enum fg_mem_backup_index {
 
 static struct fg_mem_data fg_backup_regs[FG_BACKUP_MAX] = {
 	/*       ID           Address, Offset, Length, Value*/
-	BACKUP(SOC,		0x560,   0,      28,     -EINVAL),
+	BACKUP(SOC,		0x564,   0,      24,     -EINVAL),
 	BACKUP(CYCLE_COUNT,	0x5E8,   0,      16,     -EINVAL),
 	BACKUP(CC_SOC_COEFF,	0x5BC,   0,      8,     -EINVAL),
 	BACKUP(IGAIN,		0x424,   0,      4,     -EINVAL),
@@ -655,6 +660,10 @@ struct fg_chip {
 	struct delayed_work	check_sanity_work;
 	struct fg_wakeup_source	sanity_wakeup_source;
 	u8			last_beat_count;
+#ifdef  SUPPORT_SOC_SHOW_OPTIMIZATION
+	ktime_t 		soc_kt;
+	u8	 		is_op_soc;
+#endif
 #ifdef QPNP_FG_SOC_CHANGED_EVENT
 	int			monotonic_soc_old;
 #endif
@@ -1935,8 +1944,10 @@ static int fg_backup_sram_registers(struct fg_chip *chip, bool save)
 	u16 address;
 	u8 *ptr;
 
+#ifdef SUPPORT_QPNP_NOISE_LOG
 	if (fg_debug_mask & FG_STATUS)
 		pr_info("%sing SRAM registers\n", save ? "Back" : "Restor");
+#endif
 
 	ptr = sram_backup_buffer;
 	for (i = 0; i < FG_BACKUP_MAX; i++) {
@@ -2223,15 +2234,43 @@ static int bound_soc(int soc)
         return soc;
 }
 
+#define LENUK_OP_SOC			86
+#define LENUK_SOC_MIN_CHANGE_MS		25000
 static int soc_remap(struct fg_chip *chip, int soc)
 {
         int mapped_soc = 0;
 
-        if(soc >= 90)
-        {
+	if(soc == LENUK_OP_SOC) {
+		if (!chip->is_op_soc) {
+			chip->soc_kt = ktime_get_boottime();
+			mapped_soc = soc;
+			chip->is_op_soc = 1;
+		} else {
+			ktime_t now_kt, delta_kt;
+			int delta_ms;
+
+			now_kt = ktime_get_boottime();
+			delta_kt = ktime_sub(now_kt, chip->soc_kt);
+			delta_ms = (int)div64_s64(ktime_to_ns(delta_kt), 1000000);
+
+			if (delta_ms <= LENUK_SOC_MIN_CHANGE_MS) {
+				if (chip->status == POWER_SUPPLY_STATUS_CHARGING)
+					mapped_soc = soc;
+				else
+					mapped_soc = soc + 1;
+			} else {
+				if (chip->status == POWER_SUPPLY_STATUS_CHARGING)
+					mapped_soc = soc + 1;
+				else
+					mapped_soc = soc;
+			}
+		}
+	} else if(soc > LENUK_OP_SOC) {
                 mapped_soc = bound_soc(soc + 1);
+		chip->is_op_soc = 0;
         } else {
                 mapped_soc = bound_soc(soc);
+		chip->is_op_soc = 0;
 	}
 
 	return mapped_soc;
@@ -2343,10 +2382,12 @@ static int64_t get_batt_id(unsigned int battery_id_uv, u8 bid_info)
 #define DEFAULT_TEMP_DEGC	250
 static int get_sram_prop_now(struct fg_chip *chip, unsigned int type)
 {
+#ifdef SUPPORT_QPNP_NOISE_LOG
 	if (fg_debug_mask & FG_POWER_SUPPLY)
 		pr_info("addr 0x%02X, offset %d value %d\n",
 			fg_data[type].address, fg_data[type].offset,
 			fg_data[type].value);
+#endif
 
 	if (type == FG_DATA_BATT_ID)
 		return get_batt_id(fg_data[type].value,
@@ -2359,9 +2400,11 @@ static int get_sram_prop_now(struct fg_chip *chip, unsigned int type)
 #define MAX_TEMP_DEGC	970
 static int get_prop_jeita_temp(struct fg_chip *chip, unsigned int type)
 {
+#ifdef SUPPORT_QPNP_NOISE_LOG
 	if (fg_debug_mask & FG_POWER_SUPPLY)
 		pr_info("addr 0x%02X, offset %d\n", settings[type].address,
 			settings[type].offset);
+#endif
 
 	return settings[type].value;
 }
@@ -2371,10 +2414,12 @@ static int set_prop_jeita_temp(struct fg_chip *chip,
 {
 	int rc = 0;
 
+#ifdef SUPPORT_QPNP_NOISE_LOG
 	if (fg_debug_mask & FG_POWER_SUPPLY)
 		pr_info("addr 0x%02X, offset %d temp%d\n",
 			settings[type].address,
 			settings[type].offset, decidegc);
+#endif
 
 	settings[type].value = decidegc;
 
@@ -2860,7 +2905,7 @@ wait:
 						&chip->update_jeita_setting,
 						msecs_to_jiffies(UPDATE_JEITA_DELAY_MS));
 				}
-				fg_data[0].value -= BATT_TEMP_FLOAT_VALUE + 1;
+				fg_data[0].value -= BATT_TEMP_FLOAT_VALUE + 10;
 			} else {
 				fg_data[0].value -= BATT_TEMP_FLOAT_VALUE;
 			}
@@ -3879,6 +3924,16 @@ static void fg_cap_learning_post_process(struct fg_chip *chip)
 		return;
 	}
 
+#ifdef LENUK_FIX_WARM_CAP_LEARNING_PROCESS
+	{
+		int capacity = get_prop_capacity(chip);
+
+		if (capacity < 99) {
+			pr_err("( soc %d < 99) Stop capacity learning process!\n", capacity);
+			return;
+		}
+	}
+#endif
 	max_inc_val = chip->learning_data.learned_cc_uah
 			* (1000 + chip->learning_data.max_increment);
 	do_div(max_inc_val, 1000);
@@ -5952,6 +6007,16 @@ fail:
 }
 
 #ifdef SUPPORT_BATT_ID_RECHECK
+#ifdef SUPPORT_LENUK_BATTERY_ID_ALGO
+static int batt_id_is_vaild(int bid)
+{
+	if (((bid >= 1000) && (bid < 20000))
+			|| ((bid >= 20000) && (bid < 80000)))
+		return 1;
+	else
+		return 0;
+}
+#else
 #define SUPPORT_BATT_ID_NUM		3
 #define ID_RANGE_PCT			15
 static int battery_ids[] = {
@@ -5972,6 +6037,7 @@ static int batt_id_is_vaild(int bid)
 	}
 	return 0;
 }
+#endif
 #endif
 
 #define FG_PROFILE_LEN			128
@@ -7934,7 +8000,7 @@ static int fg_hw_init(struct fg_chip *chip)
 		/* Setup workaround flag based on PMIC type */
 		if (fg_sense_type == INTERNAL_CURRENT_SENSE)
 			chip->wa_flag |= IADC_GAIN_COMP_WA;
-		if (chip->pmic_revision[REVID_DIG_MAJOR] > 1)
+		if (chip->pmic_revision[REVID_DIG_MAJOR] >= 1)
 			chip->wa_flag |= USE_CC_SOC_REG;
 
 		break;
@@ -8060,6 +8126,7 @@ static void ima_error_recovery_work(struct work_struct *work)
 				ima_error_recovery_work);
 	bool tried_again = false;
 	int rc;
+	u8 buf[4] = {0, 0, 0, 0};
 
 	fg_stay_awake(&chip->fg_reset_wakeup_source);
 	mutex_lock(&chip->ima_recovery_lock);
@@ -8184,6 +8251,12 @@ wait:
 		pr_err("fg_restart taking long time rc=%d\n", rc);
 		goto out;
 	}
+
+	rc = fg_mem_write(chip, buf, fg_data[FG_DATA_VINT_ERR].address,
+			fg_data[FG_DATA_VINT_ERR].len,
+			fg_data[FG_DATA_VINT_ERR].offset, 0);
+	if (rc < 0)
+		pr_err("Error in clearing VACT_INT_ERR, rc=%d\n", rc);
 
 	if (fg_debug_mask & FG_STATUS)
 		pr_info("IMA error recovery done...\n");
@@ -8595,6 +8668,9 @@ static int fg_probe(struct spmi_device *spmi)
 		pr_err("batt failed to register rc = %d\n", rc);
 		goto of_init_fail;
 	}
+#endif
+#ifdef SUPPORT_SOC_SHOW_OPTIMIZATION
+	chip->is_op_soc = 0;
 #endif
 	chip->power_supply_registered = true;
 	/*

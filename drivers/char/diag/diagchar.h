@@ -225,9 +225,18 @@
 
 #define DIAG_TS_SIZE	50
 
+#ifdef CONFIG_MSM_MHI
+#define DIAG_MDM_BUF_SIZE	4096
+#else
 #define DIAG_MDM_BUF_SIZE	2048
+#endif
+
 /* The Maximum request size is 2k + DCI header + footer (6 bytes) */
+#ifdef CONFIG_MSM_MHI
+#define DIAG_MDM_DCI_BUF_SIZE	(4096 + 6)
+#else
 #define DIAG_MDM_DCI_BUF_SIZE	(2048 + 6)
+#endif
 
 #define DIAG_LOCAL_PROC	0
 
@@ -500,7 +509,6 @@ struct diagchar_dev {
 	struct list_head cmd_reg_list;
 	struct mutex cmd_reg_mutex;
 	uint32_t cmd_reg_count;
-	struct mutex diagfwd_channel_mutex;
 	/* Sizes that reflect memory pool sizes */
 	unsigned int poolsize;
 	unsigned int poolsize_hdlc;

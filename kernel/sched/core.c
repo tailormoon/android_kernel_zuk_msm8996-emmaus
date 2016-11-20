@@ -4726,11 +4726,11 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 	prepare_arch_switch(next);
 
 #ifdef CONFIG_MSM_APP_SETTINGS
-	if (prev->mm && unlikely(prev->mm->app_setting))
-		clear_app_setting_bit(APP_SETTING_BIT);
+	if (use_app_setting)
+		switch_app_setting_bit(prev, next);
 
-	if (next->mm && unlikely(next->mm->app_setting))
-		set_app_setting_bit(APP_SETTING_BIT);
+	if (use_32bit_app_setting)
+		switch_32bit_app_setting_bit(prev, next);
 #endif
 }
 
@@ -5247,7 +5247,8 @@ static noinline void __schedule_bug(struct task_struct *prev)
 static inline void schedule_debug(struct task_struct *prev)
 {
 #ifdef CONFIG_SCHED_STACK_END_CHECK
-	BUG_ON(unlikely(task_stack_end_corrupted(prev)));
+	if (unlikely(task_stack_end_corrupted(prev)))
+		panic("corrupted stack end detected inside scheduler\n");
 #endif
 	/*
 	 * Test if we are atomic. Since do_exit() needs to call into

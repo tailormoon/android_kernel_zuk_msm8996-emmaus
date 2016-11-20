@@ -39,6 +39,8 @@
 #define PANEL_CMD_MIN_TX_COUNT 2
 #define PANEL_DATA_NODE_LEN 80
 
+#define INVALID_XIN_ID     0xFF
+
 static char panel_reg[2] = {DEFAULT_READ_PANEL_POWER_MODE_REG, 0x00};
 
 static int panel_debug_base_open(struct inode *inode, struct file *file)
@@ -79,7 +81,7 @@ static ssize_t panel_debug_base_offset_write(struct file *file,
 
 	buf[count] = 0;	/* end of string */
 
-	if (sscanf(buf, "%x %d", &off, &cnt) != 2)
+	if (sscanf(buf, "%x %u", &off, &cnt) != 2)
 		return -EFAULT;
 
 	if (off > dbg->max_offset)
@@ -200,6 +202,7 @@ static ssize_t panel_debug_base_reg_read(struct file *file,
 	struct mdss_panel_data *panel_data = ctl->panel_data;
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = container_of(panel_data,
 					struct mdss_dsi_ctrl_pdata, panel_data);
+	int rc = -EFAULT;
 
 	if (!dbg)
 		return -ENODEV;
@@ -218,7 +221,8 @@ static ssize_t panel_debug_base_reg_read(struct file *file,
 
 	if (!rx_buf || !panel_reg_buf) {
 		pr_err("not enough memory to hold panel reg dump\n");
-		return -ENOMEM;
+		rc = -ENOMEM;
+		goto read_reg_fail;
 	}
 
 	if (mdata->debug_inf.debug_enable_clock)
@@ -228,23 +232,19 @@ static ssize_t panel_debug_base_reg_read(struct file *file,
 	mdss_dsi_panel_cmd_read(ctrl_pdata, panel_reg[0], panel_reg[1],
 				NULL, rx_buf, dbg->cnt);
 
-	len = snprintf(panel_reg_buf, reg_buf_len, "0x%02zx: ", dbg->off);
-	if (len < 0)
-		goto read_reg_fail;
+	len = scnprintf(panel_reg_buf, reg_buf_len, "0x%02zx: ", dbg->off);
 
 	for (i = 0; (len < reg_buf_len) && (i < ctrl_pdata->rx_len); i++)
 		len += scnprintf(panel_reg_buf + len, reg_buf_len - len,
 				"0x%02x ", rx_buf[i]);
 
-	panel_reg_buf[len - 1] = '\n';
+	if (len)
+		panel_reg_buf[len - 1] = '\n';
 
 	if (mdata->debug_inf.debug_enable_clock)
 		mdata->debug_inf.debug_enable_clock(0);
 
-	if (len < 0 || len >= sizeof(panel_reg_buf))
-		return 0;
-
-	if ((count < sizeof(panel_reg_buf))
+	if ((count < reg_buf_len)
 			|| (copy_to_user(user_buf, panel_reg_buf, len)))
 		goto read_reg_fail;
 
@@ -257,8 +257,7 @@ static ssize_t panel_debug_base_reg_read(struct file *file,
 read_reg_fail:
 	kfree(rx_buf);
 	kfree(panel_reg_buf);
-	return -EFAULT;
-
+	return rc;
 }
 
 static const struct file_operations panel_off_fops = {
@@ -633,12 +632,37 @@ error:
 }
 
 static int parse_dt_xlog_dump_list(const u32 *arr, int count,
-	struct list_head *xlog_dump_list, int total_names,
-	struct platform_device *pdev, const char *name_prop)
+	struct list_head *xlog_dump_list, struct platform_device *pdev,
+	const char *name_prop, const char *xin_prop)
 {
 	struct range_dump_node *xlog_node;
 	u32 len;
-	int i;
+	int i, total_names, total_xin_ids, rc;
+	u32 *offsets = NULL;
+
+	/* Get the property with the name of the ranges */
+	total_names = of_property_count_strings(pdev->dev.of_node,
+		name_prop);
+	if (total_names < 0) {
+		pr_warn("dump names not found. rc=%d\n", total_names);
+		total_names = 0;
+	}
+
+	of_find_property(pdev->dev.of_node, xin_prop, &total_xin_ids);
+	if (total_xin_ids > 0) {
+		total_xin_ids /= sizeof(u32);
+		offsets = kcalloc(total_xin_ids, sizeof(u32), GFP_KERNEL);
+		if (offsets) {
+			rc = of_property_read_u32_array(pdev->dev.of_node,
+				xin_prop, offsets, total_xin_ids);
+			if (rc)
+				total_xin_ids = 0;
+		} else {
+			total_xin_ids = 0;
+		}
+	} else {
+		total_xin_ids = 0;
+	}
 
 	for (i = 0, len = count * 2; i < len; i += 2) {
 		xlog_node = kzalloc(sizeof(*xlog_node), GFP_KERNEL);
@@ -647,33 +671,32 @@ static int parse_dt_xlog_dump_list(const u32 *arr, int count,
 
 		xlog_node->offset.start = be32_to_cpu(arr[i]);
 		xlog_node->offset.end = be32_to_cpu(arr[i + 1]);
+
 		parse_dump_range_name(pdev->dev.of_node, total_names, i/2,
 			xlog_node->range_name,
 			ARRAY_SIZE(xlog_node->range_name), name_prop);
 
+		if ((i / 2) < total_xin_ids)
+			xlog_node->xin_id = offsets[i / 2];
+		else
+			xlog_node->xin_id = INVALID_XIN_ID;
+
 		list_add_tail(&xlog_node->head, xlog_dump_list);
 	}
 
+	kfree(offsets);
 	return 0;
 }
 
 void mdss_debug_register_dump_range(struct platform_device *pdev,
 	struct mdss_debug_base *blk_base, const char *ranges_prop,
-	const char *name_prop)
+	const char *name_prop, const char *xin_prop)
 {
-	int total_dump_names, mdp_len;
+	int mdp_len;
 	const u32 *mdp_arr;
 
 	if (!blk_base || !ranges_prop || !name_prop)
 		return;
-
-	/* Get the property with the name of the ranges */
-	total_dump_names = of_property_count_strings(pdev->dev.of_node,
-		name_prop);
-	if (total_dump_names < 0) {
-		pr_warn("dump names not found. rc=%d\n", total_dump_names);
-		total_dump_names = 0;
-	}
 
 	mdp_arr = of_get_property(pdev->dev.of_node, ranges_prop,
 			&mdp_len);
@@ -683,9 +706,8 @@ void mdss_debug_register_dump_range(struct platform_device *pdev,
 	} else {
 		/* 2 is the number of entries per row to calculate the rows */
 		mdp_len /= 2 * sizeof(u32);
-		parse_dt_xlog_dump_list(mdp_arr, mdp_len,
-			&blk_base->dump_list, total_dump_names, pdev,
-				name_prop);
+		parse_dt_xlog_dump_list(mdp_arr, mdp_len, &blk_base->dump_list,
+			pdev, name_prop, xin_prop);
 	}
 }
 
@@ -713,11 +735,11 @@ static ssize_t mdss_debug_factor_write(struct file *file,
 
 	if (strnchr(buf, count, '/')) {
 		/* Parsing buf as fraction */
-		if (sscanf(buf, "%d/%d", &numer, &denom) != 2)
+		if (sscanf(buf, "%u/%u", &numer, &denom) != 2)
 			return -EFAULT;
 	} else {
 		/* Parsing buf as percentage */
-		if (sscanf(buf, "%d", &numer) != 1)
+		if (kstrtouint(buf, 0, &numer))
 			return -EFAULT;
 		denom = 100;
 	}
@@ -1025,7 +1047,7 @@ static ssize_t mdss_debug_perf_bw_limit_write(struct file *file,
 
 	if (strnchr(buf, count, ' ')) {
 		/* Parsing buf */
-		if (sscanf(buf, "%d %d", &mode, &val) != 2)
+		if (sscanf(buf, "%u %u", &mode, &val) != 2)
 			return -EFAULT;
 	}
 
@@ -1157,6 +1179,9 @@ int mdss_debugfs_init(struct mdss_data_type *mdata)
 	//close xlog
 	//if (mdss_create_xlog_debug(mdd))
 	//	goto err;
+
+	if (mdss_create_frc_debug(mdd))
+		goto err;
 
 	mdata->debug_inf.debug_data = mdd;
 
